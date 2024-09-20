@@ -5,6 +5,7 @@ import { Route, Routes } from 'react-router'
 import { HomePage } from './components/Homepage'
 import FormBuilder from './components/FormBuilder'
 import { Layout } from './components/layout'
+import { Toaster } from './components/ui/sonner'
 
 function App() {
   return (
@@ -16,7 +17,9 @@ function App() {
           <Route path='/build' element={<FormBuilder />} />
         </Route>
       </Routes>
+
       {/* </BrowserRouter> */}
+      <Toaster richColors closeButton />
     </ThemeProvider>
   )
 }
