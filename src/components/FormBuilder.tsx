@@ -1,9 +1,7 @@
-'use client'
-
 import React, { useState, useEffect } from 'react'
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd'
-import { Plus, Trash2, GripVertical } from 'lucide-react'
-import { toast, Toaster } from 'sonner'
+import { Plus, Trash2, Copy } from 'lucide-react'
+import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -41,6 +39,7 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import Confetti from 'react-confetti'
 import { Vansh } from './test'
 
 interface FormField {
@@ -51,9 +50,8 @@ interface FormField {
   placeholder?: string
   description?: string
   isRequired: boolean
-  isDisabled: boolean
   defaultValue: string
-  options?: { label: string; value: string }[]
+  options?: { label: string; value: string; isDefault?: boolean }[]
   validation?: {
     min?: number
     max?: number
@@ -81,8 +79,36 @@ const FieldEditor: React.FC<{
   removeField: (id: string) => void
   validateFieldName: (name: string, currentId: string) => boolean
 }> = ({ field, updateField, removeField, validateFieldName }) => {
+  const validateDefaultValue = (value: string) => {
+    if (
+      (field.type === 'select' ||
+        field.type === 'radio' ||
+        field.type === 'combobox') &&
+      field.options &&
+      value &&
+      !field.options.some((option) => option.value === value)
+    ) {
+      toast.error(
+        `Default value must be one of the options for ${field.type} fields.`
+      )
+      return false
+    }
+    return true
+  }
+
+  const handleDefaultValueChange = (optionValue: string) => {
+    const updatedOptions = field.options?.map((option) => ({
+      ...option,
+      isDefault: option.value === optionValue,
+    }))
+    updateField(field.id, {
+      options: updatedOptions,
+      defaultValue: optionValue,
+    })
+  }
+
   return (
-    <Card>
+    <Card className='mb-4 border-2 border-primary/20 hover:border-primary/40 transition-colors'>
       <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
         <CardTitle className='text-sm font-medium'>
           {field.label ||
@@ -154,6 +180,26 @@ const FieldEditor: React.FC<{
               className='col-span-3'
             />
           </div>
+          {field.type !== 'select' &&
+            field.type !== 'radio' &&
+            field.type !== 'combobox' && (
+              <div className='grid grid-cols-4 items-center gap-4'>
+                <Label htmlFor={`${field.id}-default`} className='text-right'>
+                  Default Value
+                </Label>
+                <Input
+                  id={`${field.id}-default`}
+                  value={field.defaultValue || ''}
+                  onChange={(e) => {
+                    const newValue = e.target.value
+                    if (validateDefaultValue(newValue)) {
+                      updateField(field.id, { defaultValue: newValue })
+                    }
+                  }}
+                  className='col-span-3'
+                />
+              </div>
+            )}
           <div className='flex items-center space-x-2'>
             <Switch
               id={`${field.id}-required`}
@@ -163,16 +209,6 @@ const FieldEditor: React.FC<{
               }
             />
             <Label htmlFor={`${field.id}-required`}>Required</Label>
-          </div>
-          <div className='flex items-center space-x-2'>
-            <Switch
-              id={`${field.id}-disabled`}
-              checked={field.isDisabled}
-              onCheckedChange={(checked) =>
-                updateField(field.id, { isDisabled: checked })
-              }
-            />
-            <Label htmlFor={`${field.id}-disabled`}>Disabled</Label>
           </div>
           {(field.type === 'select' ||
             field.type === 'radio' ||
@@ -198,6 +234,20 @@ const FieldEditor: React.FC<{
                     placeholder='Option label'
                     required
                   />
+                  <Switch
+                    id={`${field.id}-option-${index}-default`}
+                    checked={option.isDefault || false}
+                    onCheckedChange={(checked) => {
+                      if (checked) {
+                        handleDefaultValueChange(option.value)
+                      } else {
+                        handleDefaultValueChange('')
+                      }
+                    }}
+                  />
+                  <Label htmlFor={`${field.id}-option-${index}-default`}>
+                    Default
+                  </Label>
                   <Button
                     variant='ghost'
                     size='icon'
@@ -217,7 +267,7 @@ const FieldEditor: React.FC<{
                 onClick={() => {
                   const newOptions = [
                     ...(field.options || []),
-                    { label: '', value: '' },
+                    { label: '', value: '', isDefault: false },
                   ]
                   updateField(field.id, { options: newOptions })
                 }}
@@ -243,14 +293,13 @@ const generateZodSchema = (
       case 'text':
       case 'textarea':
       case 'password':
+      case 'email':
         fieldSchema += 'string()'
+        if (field.type === 'email') fieldSchema += '.email()'
         break
       case 'number':
         fieldSchema +=
-          'string().refine((val) => val === "" || !isNaN(Number(val)), { message: "Must be a number" })'
-        break
-      case 'email':
-        fieldSchema += 'string().email()'
+          'string().refine((val) => !isNaN(Number(val)), { message: "Must be a number" }).transform(Number)'
         break
       case 'date':
         fieldSchema += 'date()'
@@ -261,32 +310,39 @@ const generateZodSchema = (
       case 'select':
       case 'radio':
       case 'combobox':
-        fieldSchema += `enum([${field.options
-          ?.map((o) => `'${o.value}'`)
-          .join(', ')}])`
+        fieldSchema += `enum([${field.options?.map((o) => `'${o.value}'`).join(', ')}])`
         break
       case 'file':
         fieldSchema += isTypeScript ? 'instanceof(FileList)' : 'any()'
         break
     }
     if (field.isRequired) {
-      fieldSchema += `.refine((val) => val !== undefined && val !== null && val !== '', { message: '${field.label || field.name} is required' })`
+      if (field.type === 'checkbox') {
+        fieldSchema += `.refine((val) => val === true, { message: '${field.label || field.name} is required' })`
+      } else {
+        fieldSchema += `.refine((val) => val !== undefined && val !== null${
+          field.type != 'combobox' &&
+          field.type != 'radio' &&
+          field.type != 'select' &&
+          field.type != 'date' &&
+          field.type != 'file'
+            ? " && val.trim() != ''"
+            : ''
+        } , { message: '${field.label || field.name} is required' })`
+      }
     } else {
       fieldSchema += '.optional()'
     }
     if (field.validation) {
       if (field.validation.min !== undefined) {
-        fieldSchema += `.refine((val) => val === "" || Number(val) >= ${field.validation.min}, { message: 'Must be at least ${field.validation.min}' })`
+        fieldSchema += `.refine((val) => Number(val) >= ${field.validation.min}, { message: 'Must be at least ${field.validation.min}' })`
       }
       if (field.validation.max !== undefined) {
-        fieldSchema += `.refine((val) => val === "" || Number(val) <= ${field.validation.max}, { message: 'Must be at most ${field.validation.max}' })`
+        fieldSchema += `.refine((val) => Number(val) <= ${field.validation.max}, { message: 'Must be at most ${field.validation.max}' })`
       }
       if (field.validation.pattern) {
         fieldSchema += `.regex(new RegExp('${field.validation.pattern}'))`
       }
-    }
-    if (field.type === 'number') {
-      fieldSchema += '.transform((val) => val === "" ? undefined : Number(val))'
     }
     schema += fieldSchema + ',\n'
   })
@@ -304,7 +360,7 @@ const generateFormComponent = (
   const imports = `import { zodResolver } from "@hookform/resolvers/zod"
 import { useForm } from "react-hook-form"
 import * as z from "zod"
-${isNextJs ? 'import { useRouter } from "next/router"' : ''}
+${isNextJs ? 'import { useRouter } from "next/navigation"' : ''}
 
 import { Button } from "@/components/ui/button"
 import {
@@ -336,14 +392,7 @@ import {
 } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
 import { format } from "date-fns"
-import { CalendarIcon, CheckIcon, ChevronsUpDown } from "lucide-react"
-import {
-  Command,
-  CommandEmpty,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-} from "@/components/ui/command"
+import { CalendarIcon, Check, ChevronsUpDown } from "lucide-react"
 import {
   Card,
   CardContent,
@@ -352,6 +401,14 @@ import {
   CardTitle,
   CardFooter,
 } from "@/components/ui/card"
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList
+} from "@/components/ui/command"
 `
 
   const schema = generateZodSchema(fields, isTypeScript)
@@ -365,242 +422,239 @@ import {
         case 'password':
         case 'number':
           fieldJSX = `<FormField
-            control={form.control}
-            name="${field.name}"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>${field.label || field.name}</FormLabel>
-                <FormControl>
-                  <Input type="${field.type}" placeholder="${field.placeholder || ''}" {...field} />
-                </FormControl>
-                ${field.description ? `<FormDescription>${field.description}</FormDescription>` : ''}
-                <FormMessage />
-              </FormItem>
-            )}
-          />`
+          control={form.control}
+          name="${field.name}"
+          render={({ field })=> (
+            <FormItem>
+              <FormLabel>${field.label || field.name}</FormLabel>
+              <FormControl>
+                <Input type="${field.type === 'number' ? 'number' : field.type}" placeholder="${field.placeholder || ''}" {...field} />
+              </FormControl>
+              ${field.description ? `<FormDescription>${field.description}</FormDescription>` : ''}
+              <FormMessage />
+            </FormItem>
+          )}
+        />`
           break
         case 'textarea':
           fieldJSX = `<FormField
-            control={form.control}
-            name="${field.name}"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>${field.label || field.name}</FormLabel>
-                <FormControl>
-                  <Textarea placeholder="${field.placeholder || ''}" {...field} />
-                </FormControl>
-                ${field.description ? `<FormDescription>${field.description}</FormDescription>` : ''}
-                <FormMessage />
-              </FormItem>
-            )}
-          />`
+          control={form.control}
+          name="${field.name}"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>${field.label || field.name}</FormLabel>
+              <FormControl>
+                <Textarea placeholder="${field.placeholder || ''}" {...field} />
+              </FormControl>
+              ${field.description ? `<FormDescription>${field.description}</FormDescription>` : ''}
+              <FormMessage />
+            </FormItem>
+          )}
+        />`
           break
         case 'select':
           fieldJSX = `<FormField
-            control={form.control}
-            name="${field.name}"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>${field.label || field.name}</FormLabel>
-                <Select onValueChange={field.onChange} defaultValue={field.value}>
-                  <FormControl>
-                    <SelectTrigger>
-                      <SelectValue placeholder="${field.placeholder || ''}" />
-                    </SelectTrigger>
-                  </FormControl>
-                  <SelectContent>
-                    ${field.options
-                      ?.map(
-                        (option) =>
-                          `<SelectItem value="${option.value}">${option.label}</SelectItem>`
-                      )
-                      .join('\n')}
-                  </SelectContent>
-                </Select>
-                ${field.description ? `<FormDescription>${field.description}</FormDescription>` : ''}
-                <FormMessage />
-              </FormItem>
-            )}
-          />`
+          control={form.control}
+          name="${field.name}"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>${field.label || field.name}</FormLabel>
+              <Select onValueChange={field.onChange} defaultValue={field.value}>
+                <FormControl>
+                  <SelectTrigger>
+                    <SelectValue placeholder="${field.placeholder || ''}" />
+                  </SelectTrigger>
+                </FormControl>
+                <SelectContent>
+                  ${field.options?.map((option) => `<SelectItem value="${option.value}">${option.label}</SelectItem>`).join('\n')}
+                </SelectContent>
+              </Select>
+              ${field.description ? `<FormDescription>${field.description}</FormDescription>` : ''}
+              <FormMessage />
+            </FormItem>
+          )}
+        />`
           break
         case 'checkbox':
           fieldJSX = `<FormField
-            control={form.control}
-            name="${field.name}"
-            render={({ field }) => (
-              <FormItem className="flex flex-row items-start space-x-3 space-y-0 rounded-md border p-4">
-                <FormControl>
-                  <Checkbox
-                    checked={field.value}
-                    onCheckedChange={field.onChange}
-                  />
-                </FormControl>
-                <div className="space-y-1 leading-none">
-                  <FormLabel>${field.label || field.name}</FormLabel>
-                  ${field.description ? `<FormDescription>${field.description}</FormDescription>` : ''}
-                </div>
-              </FormItem>
-            )}
-          />`
+          control={form.control}
+          name="${field.name}"
+          render={({ field }) => (
+            <FormItem className="flex flex-row items-start space-x-3 space-y-0 rounded-md border p-4">
+              <FormControl>
+                <Checkbox
+                  checked={field.value}
+                  onCheckedChange={field.onChange}
+                />
+              </FormControl>
+              <div className="space-y-1 leading-none">
+                <FormLabel>${field.label || field.name}</FormLabel>
+                ${field.description ? `<FormDescription>${field.description}</FormDescription>` : ''}
+              </div>
+            </FormItem>
+          )}
+        />`
           break
         case 'radio':
           fieldJSX = `<FormField
-            control={form.control}
-            name="${field.name}"
-            render={({ field }) => (
-              <FormItem className="space-y-3">
-                <FormLabel>${field.label || field.name}</FormLabel>
-                <FormControl>
-                  <RadioGroup
-                    onValueChange={field.onChange}
-                    defaultValue={field.value}
-                    className="flex flex-col space-y-1"
-                  >
-                    ${field.options
-                      ?.map(
-                        (option) => `
-                      <FormItem className="flex items-center space-x-3 space-y-0">
-                        <FormControl>
-                          <RadioGroupItem value="${option.value}" />
-                        </FormControl>
-                        <FormLabel className="font-normal">
-                          ${option.label}
-                        </FormLabel>
-                      </FormItem>`
-                      )
-                      .join('\n')}
-                  </RadioGroup>
-                </FormControl>
-                ${field.description ? `<FormDescription>${field.description}</FormDescription>` : ''}
-                <FormMessage />
-              </FormItem>
-            )}
-          />`
+          control={form.control}
+          name="${field.name}"
+          render={({ field }) => (
+            <FormItem className="space-y-3">
+              <FormLabel>${field.label || field.name}</FormLabel>
+              <FormControl>
+                <RadioGroup
+                  onValueChange={field.onChange}
+                  defaultValue={field.value}
+                  className="flex flex-col space-y-1"
+                >
+                  ${field.options
+                    ?.map(
+                      (option) => `
+                    <FormItem className="flex items-center space-x-3 space-y-0">
+                      <FormControl>
+                        <RadioGroupItem value="${option.value}" />
+                      </FormControl>
+                      <FormLabel className="font-normal">
+                        ${option.label}
+                      </FormLabel>
+                    </FormItem>`
+                    )
+                    .join('\n')}
+                </RadioGroup>
+              </FormControl>
+              ${field.description ? `<FormDescription>${field.description}</FormDescription>` : ''}
+              <FormMessage />
+            </FormItem>
+          )}
+        />`
           break
         case 'date':
           fieldJSX = `<FormField
-            control={form.control}
-            name="${field.name}"
-            render={({ field }) => (
-              <FormItem className="flex flex-col">
-                <FormLabel>${field.label || field.name}</FormLabel>
-                <Popover>
-                  <PopoverTrigger asChild>
-                    <FormControl>
-                      <Button
-                        variant={"outline"}
-                        className={cn(
-                          "w-[240px] pl-3 text-left font-normal",
-                          !field.value && "text-muted-foreground"
-                        )}
-                      >
-                        {field.value ? (
-                          format(field.value, "PPP")
-                        ) : (
-                          <span>${field.placeholder || ''}</span>
-                        )}
-                        <CalendarIcon className="ml-auto h-4 w-4 opacity-50" />
-                      </Button>
-                    </FormControl>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-auto p-0" align="start">
-                    <Calendar
-                      mode="single"
-                      selected={field.value}
-                      onSelect={field.onChange}
-                      disabled={(date) =>
-                        date > new Date() || date < new Date("1900-01-01")
-                      }
-                      initialFocus
-                    />
-                  </PopoverContent>
-                </Popover>
-                ${field.description ? `<FormDescription>${field.description}</FormDescription>` : ''}
-                <FormMessage />
-              </FormItem>
-            )}
-          />`
+          control={form.control}
+          name="${field.name}"
+          render={({ field }) => (
+            <FormItem className="flex flex-col">
+              <FormLabel>${field.label || field.name}</FormLabel>
+              <Popover>
+                <PopoverTrigger asChild>
+                  <FormControl>
+                    <Button
+                      variant={"outline"}
+                      className={cn(
+                        "w-[240px] pl-3 text-left font-normal",
+                        !field.value && "text-muted-foreground"
+                      )}
+                    >
+                      {field.value ? (
+                        format(field.value, "PPP")
+                      ) : (
+                        <span>${field.placeholder || ''}</span>
+                      )}
+                      <CalendarIcon className="ml-auto h-4 w-4 opacity-50" />
+                    </Button>
+                  </FormControl>
+                </PopoverTrigger>
+                <PopoverContent className="w-auto p-0" align="start">
+                  <Calendar
+                    mode="single"
+                    selected={field.value}
+                    onSelect={field.onChange}
+                    disabled={(date) =>
+                      date > new Date() || date < new Date("1900-01-01")
+                    }
+                    initialFocus
+                  />
+                </PopoverContent>
+              </Popover>
+              ${field.description ? `<FormDescription>${field.description}</FormDescription>` : ''}
+              <FormMessage />
+            </FormItem>
+          )}
+        />`
           break
         case 'file':
           fieldJSX = `<FormField
-            control={form.control}
-            name="${field.name}"
-            render={({ field: { value, onChange, ...field } }) => (
-              <FormItem>
-                <FormLabel>${field.label || field.name}</FormLabel>
-                <FormControl>
-                  <Input
-                    type="file"
-                    onChange={(e) => onChange(e.target.files)}
-                    {...field}
-                  />
-                </FormControl>
-                ${field.description ? `<FormDescription>${field.description}</FormDescription>` : ''}
-                <FormMessage />
-              </FormItem>
-            )}
-          />`
+          control={form.control}
+          name="${field.name}"
+          render={({ field: { value, onChange, ...field } }) => (
+            <FormItem>
+              <FormLabel>${field.label || field.name}</FormLabel>
+              <FormControl>
+                <Input
+                  type="file"
+                  onChange={(e) => onChange(e.target.files)}
+                  {...field}
+                />
+              </FormControl>
+              ${field.description ? `<FormDescription>${field.description}</FormDescription>` : ''}
+              <FormMessage />
+            </FormItem>
+          )}
+        />`
           break
         case 'combobox':
           fieldJSX = `<FormField
-            control={form.control}
-            name="${field.name}"
-            render={({ field }) => (
-              <FormItem className="flex flex-col">
-                <FormLabel>${field.label || field.name}</FormLabel>
-                <Popover>
-                  <PopoverTrigger asChild>
-                    <FormControl>
-                      <Button
-                        variant="outline"
-                        role="combobox"
-                        className={cn(
-                          "w-[200px] justify-between",
-                          !field.value && "text-muted-foreground"
-                        )}
-                      >
-                        {field.value
-                          ? ${field.options?.map((option) => `"${option.value}" === field.value ? "${option.label}" : ""`).join(' || ')}
-                          : "${field.placeholder || ''}"}
-                        <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                      </Button>
-                    </FormControl>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-[200px] p-0">
-                    <Command>
-                      <CommandInput placeholder="${field.placeholder || ''}" />
-                      <CommandEmpty>No option found.</CommandEmpty>
+          control={form.control}
+          name="${field.name}"
+          render={({ field }) => (
+            <FormItem className="flex flex-col">
+              <FormLabel>${field.label || field.name}</FormLabel>
+              <Popover>
+                <PopoverTrigger asChild>
+                  <FormControl>
+                    <Button
+                      variant="outline"
+                      role="combobox"
+                      className={cn(
+                        "w-[200px] justify-between",
+                        !field.value && "text-muted-foreground"
+                      )}
+                    >
+                      {field.value
+                        ? ${JSON.stringify(field.options)}.find(
+                            (option) => option.value === field.value
+                          )?.label
+                        : "${field.placeholder || 'Select option'}"}
+                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                    </Button>
+                  </FormControl>
+                </PopoverTrigger>
+                <PopoverContent className="w-[200px] p-0">
+                  <Command>
+                    <CommandInput placeholder="${field.placeholder || 'Search option...'}" />
+                    <CommandEmpty>No option found.</CommandEmpty>
+                    <CommandList>
                       <CommandGroup>
-                        ${field.options
-                          ?.map(
-                            (option) => `
+                        {${JSON.stringify(field.options)}.map((option) => (
                           <CommandItem
-                            value="${option.label}"
+                            value={option.label}
+                            key={option.value}
                             onSelect={() => {
-                              form.setValue("${field.name}", "${option.value}")
+                              field.onChange(option.value)
                             }}
                           >
-                            <CheckIcon
+                            <Check
                               className={cn(
                                 "mr-2 h-4 w-4",
-                                "${option.value}" === field.value
+                                option.value === field.value
                                   ? "opacity-100"
                                   : "opacity-0"
                               )}
                             />
-                            ${option.label}
-                          </CommandItem>`
-                          )
-                          .join('\n')}
+                            {option.label}
+                          </CommandItem>
+                        ))}
                       </CommandGroup>
-                    </Command>
-                  </PopoverContent>
-                </Popover>
-                ${field.description ? `<FormDescription>${field.description}</FormDescription>` : ''}
-                <FormMessage />
-              </FormItem>
-            )}
-          />`
+                    </CommandList>
+                  </Command>
+                </PopoverContent>
+              </Popover>
+              ${field.description ? `<FormDescription>${field.description}</FormDescription>` : ''}
+              <FormMessage />
+            </FormItem>
+          )}
+        />`
           break
       }
       return fieldJSX
@@ -616,13 +670,23 @@ export function ${formName.replace(/[^a-zA-Z0-9_]/g, '')}() {
       ${fields
         .map((f) => {
           if (f.type === 'checkbox') {
-            return `${f.name}: false`
+            return `${f.name}: ${f.defaultValue === 'true'}`
           } else if (f.type === 'date') {
-            return `${f.name}: undefined`
+            return `${f.name}: ${f.defaultValue ? `new Date('${f.defaultValue}')` : 'undefined'}`
           } else if (f.type === 'number') {
             return `${f.name}: ${f.defaultValue ? `'${f.defaultValue}'` : 'undefined'}`
+          } else if (f.type === 'file') {
+            return `${f.name}: undefined`
+          } else if (
+            f.type === 'combobox' ||
+            f.type === 'select' ||
+            f.type === 'radio'
+          ) {
+            const defaultOption = f.options?.find((opt) => opt.isDefault)
+            return `${f.name}: ${defaultOption ? `'${defaultOption.value}'` : 'undefined'}`
+          } else {
+            return `${f.name}: ${f.defaultValue ? `'${f.defaultValue}'` : 'undefined'}`
           }
-          return `${f.name}: ${f.defaultValue ? `'${f.defaultValue}'` : 'undefined'}`
         })
         .join(',\n      ')}
     },
@@ -644,12 +708,10 @@ export function ${formName.replace(/[^a-zA-Z0-9_]/g, '')}() {
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-8">
             ${formFields}
+            <Button type="submit" className="w-full">Submit</Button>
           </form>
         </Form>
       </CardContent>
-      <CardFooter>
-        <Button type="submit" onClick={form.handleSubmit(onSubmit)} className="w-full">Submit</Button>
-      </CardFooter>
     </Card>
   )
 }
@@ -667,6 +729,7 @@ export default function FormBuilder() {
   const [generatedCode, setGeneratedCode] = useState('')
   const [isTypeScript, setIsTypeScript] = useState(true)
   const [isNextJs, setIsNextJs] = useState(true)
+  const [showConfetti, setShowConfetti] = useState(false)
 
   const validateFieldName = (name: string, currentId: string) => {
     return !fields.some(
@@ -682,7 +745,6 @@ export default function FormBuilder() {
         label: '',
         name: `field_${Date.now()}`,
         isRequired: false,
-        isDisabled: false,
         defaultValue: '',
       }
 
@@ -729,7 +791,6 @@ export default function FormBuilder() {
       return
     }
 
-    // Validate required fields
     const invalidFields = fields.filter(
       (field) =>
         !field.label ||
@@ -754,8 +815,14 @@ export default function FormBuilder() {
     setIsCodeDisplayOpen(true)
   }
 
+  const handleCopyCode = () => {
+    navigator.clipboard.writeText(generatedCode)
+    toast.success('Code copied to clipboard')
+    setShowConfetti(true)
+    setTimeout(() => setShowConfetti(false), 5000)
+  }
+
   useEffect(() => {
-    // Check for duplicate field names
     const fieldNames = fields.map((field) => field.name)
     const duplicates = fieldNames.filter(
       (name, index) => fieldNames.indexOf(name) !== index
@@ -768,80 +835,103 @@ export default function FormBuilder() {
   }, [fields])
 
   return (
-    <div className='container mx-auto py-10'>
-      <Toaster />
-      <Card className='mb-8'>
+    <div className='container mx-auto py-10 space-y-8 mt-8'>
+      {showConfetti && (
+        <Confetti
+          width={window.innerWidth}
+          height={window.innerHeight}
+          recycle={false}
+          numberOfPieces={200}
+          gravity={0.1}
+        />
+      )}
+      <Card className='bg-gradient-to-br from-primary/5 to-secondary/5 shadow-lg'>
         <CardHeader>
-          <CardTitle>Form Details</CardTitle>
-          <CardDescription>
-            Enter the basic information for your form.
+          <CardTitle className='text-3xl font-bold text-primary'>
+            Form Builder
+          </CardTitle>
+          <CardDescription className='text-lg text-secondary-foreground'>
+            Create your custom form with ease
           </CardDescription>
         </CardHeader>
-        <CardContent className='space-y-4'>
-          <div className='grid grid-cols-4 items-center gap-4'>
-            <Label htmlFor='form-name' className='text-right'>
-              Form Name
-            </Label>
-            <Input
-              id='form-name'
-              value={formName}
-              onChange={(e) => setFormName(e.target.value)}
-              className='col-span-3'
-            />
+        <CardContent className='space-y-6'>
+          <div className='grid grid-cols-1 md:grid-cols-2 gap-6'>
+            <div className='space-y-2'>
+              <Label htmlFor='form-name' className='text-lg font-semibold'>
+                Form Name
+              </Label>
+              <Input
+                id='form-name'
+                value={formName}
+                onChange={(e) => setFormName(e.target.value)}
+                className='text-lg'
+              />
+            </div>
+            <div className='space-y-2'>
+              <Label
+                htmlFor='form-description'
+                className='text-lg font-semibold'
+              >
+                Description
+              </Label>
+              <Textarea
+                id='form-description'
+                value={formDescription}
+                onChange={(e) => setFormDescription(e.target.value)}
+                className='text-lg'
+              />
+            </div>
           </div>
-          <div className='grid grid-cols-4 items-center gap-4'>
-            <Label htmlFor='form-description' className='text-right'>
-              Description
-            </Label>
-            <Textarea
-              id='form-description'
-              value={formDescription}
-              onChange={(e) => setFormDescription(e.target.value)}
-              className='col-span-3'
-            />
-          </div>
-          <div className='flex items-center space-x-4'>
-            <Label>Framework:</Label>
-            <Select
-              value={isNextJs ? 'nextjs' : 'react'}
-              onValueChange={(value) => setIsNextJs(value === 'nextjs')}
-            >
-              <SelectTrigger className='w-[180px]'>
-                <SelectValue placeholder='Select framework' />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value='react'>React</SelectItem>
-                <SelectItem value='nextjs'>Next.js</SelectItem>
-              </SelectContent>
-            </Select>
-            <Label>Language:</Label>
-            <Select
-              value={isTypeScript ? 'typescript' : 'javascript'}
-              onValueChange={(value) => setIsTypeScript(value === 'typescript')}
-            >
-              <SelectTrigger className='w-[180px]'>
-                <SelectValue placeholder='Select language' />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value='javascript'>JavaScript</SelectItem>
-                <SelectItem value='typescript'>TypeScript</SelectItem>
-              </SelectContent>
-            </Select>
+          <div className='flex flex-wrap gap-6'>
+            <div className='w-full md:w-auto'>
+              <Label className='text-lg font-semibold'>Framework</Label>
+              <Select
+                value={isNextJs ? 'nextjs' : 'react'}
+                onValueChange={(value) => setIsNextJs(value === 'nextjs')}
+              >
+                <SelectTrigger className='w-[180px]'>
+                  <SelectValue placeholder='Select framework' />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value='react'>React</SelectItem>
+                  <SelectItem value='nextjs'>Next.js</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className='w-full md:w-auto'>
+              <Label className='text-lg font-semibold'>Language</Label>
+              <Select
+                value={isTypeScript ? 'typescript' : 'javascript'}
+                onValueChange={(value) =>
+                  setIsTypeScript(value === 'typescript')
+                }
+              >
+                <SelectTrigger className='w-[180px]'>
+                  <SelectValue placeholder='Select language' />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value='javascript'>JavaScript</SelectItem>
+                  <SelectItem value='typescript'>TypeScript</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
           </div>
         </CardContent>
       </Card>
 
-      <Card>
+      <Card className='bg-gradient-to-br from-primary/5 to-secondary/5 shadow-lg'>
         <CardHeader>
-          <CardTitle>Form Fields</CardTitle>
-          <CardDescription>
-            Add and configure the fields for your form.
+          <CardTitle className='text-2xl font-bold text-primary'>
+            Form Fields
+          </CardTitle>
+          <CardDescription className='text-lg text-secondary-foreground'>
+            Add and configure the fields for your form
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className='flex items-center space-x-2 mb-4'>
+          <div className='flex items-center space-x-4 mb-6'>
             <Select value={selectedType} onValueChange={setSelectedType}>
-              <SelectTrigger className='w-[180px]'>
+              <SelectTrigger className='w-[200px]'>
                 <SelectValue placeholder='Select field type' />
               </SelectTrigger>
               <SelectContent>
@@ -852,7 +942,11 @@ export default function FormBuilder() {
                 ))}
               </SelectContent>
             </Select>
-            <Button onClick={addField} disabled={!selectedType}>
+            <Button
+              onClick={addField}
+              disabled={!selectedType}
+              className='bg-primary text-primary-foreground hover:bg-primary/90'
+            >
               Add Field
             </Button>
           </div>
@@ -860,7 +954,11 @@ export default function FormBuilder() {
           <DragDropContext onDragEnd={onDragEnd}>
             <Droppable droppableId='fields'>
               {(provided) => (
-                <div {...provided.droppableProps} ref={provided.innerRef}>
+                <div
+                  {...provided.droppableProps}
+                  ref={provided.innerRef}
+                  className='space-y-4'
+                >
                   {fields.map((field, index) => (
                     <Draggable
                       key={field.id}
@@ -873,24 +971,14 @@ export default function FormBuilder() {
                           {...provided.draggableProps}
                           className='mb-4'
                         >
-                          <Card>
-                            <CardHeader className='flex flex-row items-center'>
-                              <div {...provided.dragHandleProps}>
-                                <GripVertical className='h-5 w-5' />
-                              </div>
-                              <CardTitle className='ml-2 text-lg'>
-                                {field.label || `${field.type} Field`}
-                              </CardTitle>
-                            </CardHeader>
-                            <CardContent>
-                              <FieldEditor
-                                field={field}
-                                updateField={updateField}
-                                removeField={removeField}
-                                validateFieldName={validateFieldName}
-                              />
-                            </CardContent>
-                          </Card>
+                          <div {...provided.dragHandleProps}>
+                            <FieldEditor
+                              field={field}
+                              updateField={updateField}
+                              removeField={removeField}
+                              validateFieldName={validateFieldName}
+                            />
+                          </div>
                         </div>
                       )}
                     </Draggable>
@@ -914,20 +1002,27 @@ export default function FormBuilder() {
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
-          <Button onClick={handleGenerateCode}>Generate Form Code</Button>
+          <Button
+            onClick={handleGenerateCode}
+            className='bg-primary text-primary-foreground hover:bg-primary/90'
+          >
+            Generate Form Code
+          </Button>
         </CardFooter>
       </Card>
 
       <Dialog open={isCodeDisplayOpen} onOpenChange={setIsCodeDisplayOpen}>
         <DialogContent className='max-w-4xl max-h-[80vh]'>
           <DialogHeader>
-            <DialogTitle>Generated Form Code</DialogTitle>
-            <DialogDescription>
+            <DialogTitle className='text-2xl font-bold text-primary'>
+              Generated Form Code
+            </DialogTitle>
+            <DialogDescription className='text-lg text-secondary-foreground'>
               Copy and paste this code into your project to use the generated
               form.
             </DialogDescription>
           </DialogHeader>
-          <ScrollArea className='h-[60vh]'>
+          <ScrollArea className='h-[60vh] rounded-md border-2 border-primary/20 p-4'>
             <SyntaxHighlighter
               language={isTypeScript ? 'typescript' : 'javascript'}
               style={vscDarkPlus}
@@ -943,17 +1038,14 @@ export default function FormBuilder() {
           </ScrollArea>
           <DialogFooter>
             <Button
-              onClick={() => {
-                navigator.clipboard.writeText(generatedCode)
-                toast.success('Code copied to clipboard')
-              }}
+              onClick={handleCopyCode}
+              className='bg-primary text-primary-foreground hover:bg-primary/90'
             >
-              Copy Code
+              <Copy className='mr-2 h-4 w-4' /> Copy Code
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <Vansh />
     </div>
   )
 }
